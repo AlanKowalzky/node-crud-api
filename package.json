@@ -12,7 +12,11 @@
     "lint": "eslint \"src/**/*.ts\" --fix",
     "test": "jest --silent",
     "test:verbose": "jest",
-    "build": "tsc"
+    "build": "tsc",
+    "start:dev": "ts-node-dev --respawn src/index.ts",
+    "start:prod": "tsc && node dist/index.js",
+    "start:multi": "ts-node src/cluster.ts"
+  
   },
   "devDependencies": {
     "@babel/preset-env": "^7.24.0",
