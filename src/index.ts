@@ -51,6 +51,11 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Server is listening on port ${PORT}`);
-});
+// Uruchom serwer tylko, jeśli plik jest wykonywany bezpośrednio
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`Server is listening on port ${PORT}`);
+  });
+}
+
+export default server; // Wyeksportuj serwer dla testów
