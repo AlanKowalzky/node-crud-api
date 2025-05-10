@@ -6,6 +6,15 @@ dotenv.config();
 
 const PORT = process.env.PORT || 4000;
 
+const handleServerError = (error: unknown, res: http.ServerResponse) => {
+  console.error('Unexpected server error:', error);
+  res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+  // Upewnij się, że res.end jest zawsze wywoływane, nawet jeśli res już zostało zakończone
+  if (!res.writableEnded) {
+    res.end(JSON.stringify({ message: 'Internal Server Error. Please try again later.' }));
+  }
+};
+
 const server = http.createServer((req, res) => {
   try {
     const { method, url } = req;
@@ -38,9 +47,7 @@ const server = http.createServer((req, res) => {
     }
   } catch (error) {
     // Globalna obsługa błędów serwera
-    console.error('Unexpected server error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ message: 'Internal Server Error. Please try again later.' }));
+    handleServerError(error, res);
   }
 });
 
