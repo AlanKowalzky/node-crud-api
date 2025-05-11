@@ -1,119 +1,162 @@
 import { IncomingMessage, ServerResponse } from 'http';
 import { v4 as uuidv4, validate as uuidValidate } from 'uuid';
 import { User } from './user.types';
-import { users } from './database';
+import cluster from 'cluster'; // Do sprawdzenia, czy jesteśmy workerem
+import { users as localUsersDatabase } from './database'; // Lokalna baza danych dla trybu non-cluster
 
-export const getUsers = (_req: IncomingMessage, res: ServerResponse) => {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(users));
+const sendIpcRequest = (type: string, payload?: any): Promise<any> => {
+    return new Promise((resolve, reject) => {
+        // Sprawdzamy, czy jesteśmy w workerze i czy kanał IPC jest dostępny
+        if (!cluster.isWorker || !process.send) {
+            return reject(new Error('IPC channel not available. Not a forked worker or process.send is undefined.'));
+        }
+
+        const requestId = Math.random().toString(36).substring(2, 15) + Date.now();
+        const message = { type, payload, requestId, from: 'worker' };
+
+        const onMessageHandler = (response: any) => {
+            if (response.requestId === requestId && response.from === 'primary') {
+                process.removeListener('message', onMessageHandler);
+                if (response.error) {
+                    reject(new Error(response.error.message || 'IPC request failed in primary process'));
+                } else {
+                    resolve(response.payload);
+                }
+            }
+        };
+        process.on('message', onMessageHandler);
+        process.send(message);
+    });
 };
 
-export const getUserById = (_req: IncomingMessage, res: ServerResponse, userId: string) => {
+export const getUsers = async (_req: IncomingMessage, res: ServerResponse) => {
+    try {
+        let usersList: User[];
+        if (cluster.isWorker) {
+            usersList = await sendIpcRequest('getUsers');
+        } else {
+            usersList = [...localUsersDatabase];
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(usersList));
+    } catch (error: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ message: error.message || 'Failed to get users' }));
+    }
+};
+
+export const getUserById = async (_req: IncomingMessage, res: ServerResponse, userId: string) => {
     if (!uuidValidate(userId)) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ message: 'Invalid userId format (not a valid UUID)' }));
-        return;
+        return res.end(JSON.stringify({ message: 'Invalid userId format (not a valid UUID)' }));
     }
-
-    const user = users.find(u => u.id === userId);
-
-    if (user) {
+    try {
+        let user: User | undefined;
+        if (cluster.isWorker) {
+            user = await sendIpcRequest('getUserById', { userId });
+        } else {
+            user = localUsersDatabase.find(u => u.id === userId);
+            if (!user) throw new Error(`User with id ${userId} not found`);
+        }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(user));
-    } else {
+    } catch (error: any) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ message: `User with id ${userId} not found` }));
+        res.end(JSON.stringify({ message: error.message || `User with id ${userId} not found` }));
     }
 };
 
-export const createUser = (req: IncomingMessage, res: ServerResponse) => {
+export const createUser = async (req: IncomingMessage, res: ServerResponse) => {
     let body = '';
     req.on('data', chunk => {
         body += chunk.toString();
     });
-    req.on('end', () => {
+    req.on('end', async () => {
         try {
             const { username, age, hobbies } = JSON.parse(body);
             if (typeof username !== 'string' || typeof age !== 'number' || !Array.isArray(hobbies) || !hobbies.every(h => typeof h === 'string')) {
                 res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify({ message: 'Request body does not contain required fields or fields are of incorrect type' }));
-                return;
+                return res.end(JSON.stringify({ message: 'Request body does not contain required fields or fields are of incorrect type' }));
             }
 
-            const newUser: User = { id: uuidv4(), username, age, hobbies };
-            users.push(newUser);
+            let createdUser: User;
+            if (cluster.isWorker) {
+                const newUserPayload = { username, age, hobbies };
+                createdUser = await sendIpcRequest('createUser', newUserPayload);
+            } else {
+                createdUser = { id: uuidv4(), username, age, hobbies };
+                localUsersDatabase.push(createdUser);
+            }
+
             res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify(newUser));
-        } catch (error) {
+            res.end(JSON.stringify(createdUser));
+        } catch (error: any) {
             res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ message: 'Invalid JSON in request body' }));
+            res.end(JSON.stringify({ message: error.message || 'Invalid JSON in request body or error creating user' }));
         }
     });
 };
 
-export const updateUser = (req: IncomingMessage, res: ServerResponse, userId: string) => {
+export const updateUser = async (req: IncomingMessage, res: ServerResponse, userId: string) => {
     if (!uuidValidate(userId)) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ message: 'Invalid userId format (not a valid UUID)' }));
-        return;
+        return res.end(JSON.stringify({ message: 'Invalid userId format (not a valid UUID)' }));
     }
-
-    const userIndex = users.findIndex(u => u.id === userId);
-
-    if (userIndex === -1) {
-        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ message: `User with id ${userId} not found` }));
-        return;
-    }
-
     let body = '';
     req.on('data', chunk => {
         body += chunk.toString();
     });
-    req.on('end', () => {
-        const userToUpdate = users[userIndex];
-
-        if (!userToUpdate) {
-            res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ message: `User with id '${userId}' not found for update (possibly deleted concurrently).` }));
-            return;
-        }
-
+    req.on('end', async () => {
         try {
             const { username, age, hobbies } = JSON.parse(body);
             if (typeof username !== 'string' || typeof age !== 'number' || !Array.isArray(hobbies) || !hobbies.every(h => typeof h === 'string')) {
                 res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify({ message: 'Request body does not contain required fields or fields are of incorrect type for update' }));
-                return;
+                return res.end(JSON.stringify({ message: 'Request body does not contain required fields or fields are of incorrect type for update' }));
             }
-            const updatedUser: User = { id: userToUpdate.id, username, age, hobbies };
-            users[userIndex] = updatedUser;
+
+            let updatedUserResponse: User | undefined;
+            if (cluster.isWorker) {
+                const updateUserPayload = { userId, userData: { username, age, hobbies } };
+                updatedUserResponse = await sendIpcRequest('updateUser', updateUserPayload);
+            } else {
+                const userIndex = localUsersDatabase.findIndex(u => u.id === userId);
+                if (userIndex === -1) {
+                    throw new Error(`User with id ${userId} not found for update`);
+                }
+                localUsersDatabase[userIndex] = { ...localUsersDatabase[userIndex], username, age, hobbies, id: userId };
+                updatedUserResponse = localUsersDatabase[userIndex];
+            }
+            if (!updatedUserResponse) throw new Error('Update failed or user not found');
 
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify(updatedUser));
-        } catch (error) {
-            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ message: 'Invalid JSON in request body' }));
+            res.end(JSON.stringify(updatedUserResponse));
+        } catch (error: any) {
+            const statusCode = error.message && error.message.toLowerCase().includes('not found') ? 404 : 400;
+            res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ message: error.message || 'Invalid JSON in request body or error updating user' }));
         }
     });
 };
 
-export const deleteUser = (_req: IncomingMessage, res: ServerResponse, userId: string) => {
+export const deleteUser = async (_req: IncomingMessage, res: ServerResponse, userId: string) => {
     if (!uuidValidate(userId)) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ message: 'Invalid userId format (not a valid UUID)' }));
-        return;
+        return res.end(JSON.stringify({ message: 'Invalid userId format (not a valid UUID)' }));
     }
-
-    const userIndex = users.findIndex(u => u.id === userId);
-
-    if (userIndex === -1) {
+    try {
+        if (cluster.isWorker) {
+            await sendIpcRequest('deleteUser', { userId });
+        } else {
+            const userIndex = localUsersDatabase.findIndex(u => u.id === userId);
+            if (userIndex === -1) {
+                throw new Error(`User with id ${userId} not found for deletion`);
+            }
+            localUsersDatabase.splice(userIndex, 1);
+        }
+        res.writeHead(204, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end();
+    } catch (error: any) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ message: `User with id ${userId} not found` }));
-        return;
+        res.end(JSON.stringify({ message: error.message || `User with id ${userId} not found` }));
     }
-
-    users.splice(userIndex, 1);
-    res.writeHead(204, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end();
 };
