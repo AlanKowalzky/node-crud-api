@@ -1,7 +1,7 @@
 import http from 'http';
-import * as userController from '../userController'; // Zakładając, że userController jest w ../
-import { handleServerError } from '../utils/handleServerError'; // Zakładając, że handleServerError jest w ../utils/
-import cluster from 'cluster'; // Dla logowania, jeśli potrzebne
+import * as userController from '../userController';
+import { handleServerError } from '../utils/handleServerError';
+import cluster from 'cluster';
 
 export class ServerCore {
   static createServer() {
@@ -22,15 +22,33 @@ export class ServerCore {
             userController.createUser(req, res);
           } else if (method === 'PUT' && userIdSegment && !hasExtraSegments) {
             userController.updateUser(req, res, userIdSegment);
-          } else if (method === 'DELETE' && userIdSegment && !hasExtraSegments) {
+          } else if (
+            method === 'DELETE' &&
+            userIdSegment &&
+            !hasExtraSegments
+          ) {
             userController.deleteUser(req, res, userIdSegment);
           } else {
-            res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ message: `Resource not found at ${url} ${cluster.isWorker ? `on worker ${process.pid}` : ''}` }));
+            res.writeHead(404, {
+              'Content-Type': 'application/json; charset=utf-8',
+            });
+            res.end(
+              JSON.stringify({
+                message: `Resource not found at ${url} ${cluster.isWorker ? `on worker ${process.pid}` : ''}`,
+              }),
+            );
           }
+        } else if (url === '/api/test-500-error' && method === 'GET') {
+          throw new Error('Intentional test error for 500 status');
         } else {
-          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ message: `Resource not found ${cluster.isWorker ? `on worker ${process.pid}` : ''}` }));
+          res.writeHead(404, {
+            'Content-Type': 'application/json; charset=utf-8',
+          });
+          res.end(
+            JSON.stringify({
+              message: `Resource not found ${cluster.isWorker ? `on worker ${process.pid}` : ''}`,
+            }),
+          );
         }
       } catch (error) {
         handleServerError(error, res);
