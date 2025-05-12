@@ -4,7 +4,8 @@ module.exports = {
   testMatch: ['**/?(*.)+(test).ts'],
   moduleFileExtensions: ['ts', 'js', 'json'],
   moduleNameMapper: {
-    '^axios$': require.resolve('axios'),
+    //'^axios$': require.resolve('axios'),
+    // '^@/(.*)$': '<rootDir>/src/$1',
   },
   restoreMocks: true,
   resetMocks: true,
