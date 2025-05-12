@@ -143,6 +143,13 @@ describe('Users API - Standalone Mode - Error Handling', () => {
         const response = await request(serverInstance).delete(`/api/users/${nonExistentId}`);
         expect(response.status).toBe(404);
     });
+
+    test('2.6 GET /api/test-500-error - should return 500 for an intentional server error', async () => {
+        const response = await request(serverInstance).get('/api/test-500-error');
+        expect(response.status).toBe(500);
+        // Sprawdzamy, czy komunikat błędu jest zgodny z tym, co zwraca ogólny handler błędów w server-core.ts
+        expect(response.body.message).toBe('Internal Server Error - An unexpected error occurred');
+    });
 });
 
 describe('Users API - Standalone Mode - Non-existent Endpoints', () => {
