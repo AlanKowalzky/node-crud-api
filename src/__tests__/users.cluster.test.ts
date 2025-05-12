@@ -1,62 +1,147 @@
 import request from 'supertest';
-import { exec, ChildProcess } from 'child_process';
+import { spawn, ChildProcess } from 'child_process'; // Zmieniamy na spawn dla lepszej kontroli
 import path from 'path';
+import os from 'os'; // Dodajemy moduł os do obliczenia liczby CPU
 // import { v4 as uuidv4 } from 'uuid'; // Usunięto, jeśli nie jest używany
 import * as dotenv from 'dotenv';
 
 dotenv.config(); // Aby odczytać PORT z .env dla żądań
 
-const PORT = parseInt(process.env.PORT || '4000', 10);
-const BASE_URL = `http://localhost:${PORT}`;
+const TEST_E2E_CLUSTER_PORT = 4008; // Dedykowany port dla tych testów E2E klastra
+const BASE_URL = `http://localhost:${TEST_E2E_CLUSTER_PORT}`;
 
 describe('Users API - Cluster Mode E2E Tests', () => {
+    // Zwiększamy domyślny timeout dla hooków w tym pliku testowym
+    jest.setTimeout(35000); // 35 sekund, trochę więcej na wszelki wypadek
+
     let clusterProcess: ChildProcess | null = null;
     let createdUserForBasicScenario: { id?: string, username?: string, age?: number, hobbies?: string[] } = {};
     let createdUserForConsistencyTest: { id?: string, username?: string, age?: number, hobbies?: string[] } = {};
 
     beforeAll((done) => {
         // Ścieżka do głównego katalogu projektu
-        const projectRoot = path.resolve(__dirname, '../../../'); 
+        const projectRoot = path.resolve(__dirname, '../../'); // Poprawka: tak jak w startup.test.ts
+        const distPath = path.join(projectRoot, 'dist', 'index.js'); // Upewnijmy się, że to jest poprawna ścieżka
 
-        // Uruchamiamy aplikację w trybie klastra
-        // Używamy ts-node bezpośrednio, aby uniknąć problemów z kompilacją w locie dla testów
-        // Upewnij się, że ścieżka do ts-node jest poprawna lub jest w PATH
-        // Alternatywnie, można by uruchomić "npm run start:multi"
-        clusterProcess = exec( // TODO: Rozważyć użycie `spawn` dla lepszej kontroli nad strumieniami i sygnałami
-            `cross-env CLUSTER_MODE=true ts-node ./src/index.ts`,
-            { cwd: projectRoot }, // Uruchom w głównym katalogu projektu
-            (error, stdout, stderr) => {
-                if (error && !error.killed) { // Ignoruj błąd, jeśli proces został zabity przez nas
-                    console.error(`Error starting cluster: ${error.message}`);
-                    return done(error);
-                }
-                if (stderr) {
-                    console.warn(`Cluster stderr: ${stderr}`);
-                }
-                if (stdout) {
-                    // console.log(`Cluster stdout: ${stdout}`); // Opcjonalnie loguj stdout
-                }
+        // WAŻNE: Upewnij się, że projekt jest skompilowany (`npm run build`) przed uruchomieniem tych testów.
+        console.log(`[CLUSTER_TEST_SETUP] Attempting to start cluster from: ${distPath}`);
+
+        // Uruchomienie skompilowanego pliku JS
+        const command = 'node';
+        const args = [distPath];
+
+        clusterProcess = spawn(command, args,
+            { 
+                cwd: projectRoot, 
+                shell: false, // Zmieniono na false dla większej przewidywalności
+                stdio: ['ignore', 'pipe', 'pipe'], // Przekieruj stdout/stderr
+                env: { ...process.env, CLUSTER_MODE: 'true', PORT: TEST_E2E_CLUSTER_PORT.toString() } // Przekaż dedykowany port testowy
             }
         );
 
-        // Dajemy trochę czasu na uruchomienie wszystkich workerów i load balancera
-        // W bardziej zaawansowanym scenariuszu można by nasłuchiwać na logi lub próbować pingować serwer
-        console.log('Waiting for cluster to start...');
-        setTimeout(() => {
-            console.log('Cluster should be started. Proceeding with tests.');
-            done();
-        }, process.env.CI ? 15000 : 7000); // Dłuższy czas dla CI
+        if (!clusterProcess) {
+            return done(new Error('Failed to spawn cluster process.'));
+        }
+
+        const numCPUs = os.cpus().length;
+        const expectedWorkers = Math.max(1, numCPUs - 1); // Taka sama logika jak w ClusterMain
+        let readyWorkersCount = 0;
+        let masterReady = false;
+        let serverReadyTimeout: NodeJS.Timeout | null = null;
+        let prematureExitError: Error | null = null;
+
+        clusterProcess.stdout?.on('data', (data) => {
+            const output = data.toString().trim();
+            // Dzielimy output na linie, aby przetwarzać każdą osobno
+            output.split('\n').forEach((line: string) => {
+                console.log(`[Cluster STDOUT]: ${line}`);
+                // Sprawdzamy, czy master zgłosił gotowość
+                if (line.includes(`Main server on port ${TEST_E2E_CLUSTER_PORT}`) && !masterReady) {
+                    masterReady = true;
+                    console.log('[CLUSTER_TEST_SETUP] Master process reported ready.');
+                }
+                // Sprawdzamy, czy MASTER potwierdził, że worker nasłuchuje
+                if (line.includes(' is now listening on port') && line.includes('Worker ') && masterReady) {
+                    readyWorkersCount++;
+                    console.log(`[CLUSTER_TEST_SETUP] Worker reported ready. Total ready workers: ${readyWorkersCount}/${expectedWorkers}`);
+                    if (readyWorkersCount >= expectedWorkers) {
+                        if (serverReadyTimeout) clearTimeout(serverReadyTimeout);
+                        if (!prematureExitError) {
+                            console.log(`[CLUSTER_TEST_SETUP] All ${expectedWorkers} workers reported ready. Proceeding with tests.`);
+                            done();
+                        }
+                    }
+                }
+            });
+        });
+
+        clusterProcess.stderr?.on('data', (data) => {
+            const errorOutput = data.toString().trim();
+            // Dzielimy output na linie, aby przetwarzać każdą osobno
+            errorOutput.split('\n').forEach((line: string) => {
+                // Użyj console.error dla większej widoczności, jeśli to faktycznie błędy
+                // Możesz też spróbować process.stderr.write bezpośrednio, ale console.error powinno wystarczyć
+                console.error(`[Cluster STDERR RAW]: ${line}`);
+            });
+        });
+
+        clusterProcess.on('error', (err) => {
+            console.error('[CLUSTER_TEST_SETUP] Failed to start cluster process (spawn error):', err);
+            if (serverReadyTimeout) clearTimeout(serverReadyTimeout);
+            prematureExitError = err;
+            // Zawsze kończ test błędem, jeśli wystąpił błąd 'spawn'
+            // Niezależnie od tego, czy workery były gotowe, błąd 'spawn' jest krytyczny.
+            // done(err); // To może być problematyczne, jeśli done już zostało wywołane.
+            // Zamiast tego, pozwólmy, aby test zawiódł z powodu timeoutu lub błędu 'exit'.
+        });
+
+        clusterProcess.on('exit', (code, signal) => {
+            console.log(`[CLUSTER_TEST_SETUP] Cluster process exited with code ${code} and signal ${signal}. Master ready: ${masterReady}, Ready workers: ${readyWorkersCount}/${expectedWorkers}`);
+            if (readyWorkersCount < expectedWorkers && !prematureExitError) {
+                if (serverReadyTimeout) clearTimeout(serverReadyTimeout);
+                const exitError = new Error(`[CLUSTER_TEST_SETUP] Cluster process exited prematurely with code ${code}, signal ${signal}`);
+                prematureExitError = exitError;
+                done(exitError);
+            }
+        });
+
+        // Timeout, jeśli serwer nie zgłosi gotowości
+        serverReadyTimeout = setTimeout(() => {
+            if (readyWorkersCount < expectedWorkers) {
+                console.error(`[CLUSTER_TEST_SETUP] Cluster did not report ${expectedWorkers} workers ready in time. Only ${readyWorkersCount} were ready.`);
+                if (clusterProcess && clusterProcess.pid && !clusterProcess.killed) {
+                    clusterProcess.kill('SIGKILL'); // Zabij proces, jeśli nie wystartował
+                }
+                done(new Error('Cluster readiness timeout. Check server logs.'));
+            }
+        }, process.env.CI ? 30000 : 20000); // Zwiększony timeout na gotowość
+
     });
 
     afterAll((done) => {
-        if (clusterProcess) {
-            console.log('Stopping cluster process...');
-            clusterProcess.kill(); // Zabij proces główny klastra
-            clusterProcess.on('exit', () => {
-                console.log('Cluster process stopped.');
+        if (clusterProcess && clusterProcess.pid && !clusterProcess.killed) {
+            console.log(`[CLUSTER_TEST_TEARDOWN] Stopping cluster process PID: ${clusterProcess.pid}...`);
+            
+            const timeout = setTimeout(() => {
+                console.warn(`[CLUSTER_TEST_TEARDOWN] Cluster process PID: ${clusterProcess?.pid} did not exit in time after SIGTERM. Sending SIGKILL.`);
+                if (clusterProcess && clusterProcess.pid && !clusterProcess.killed) {
+                    clusterProcess.kill('SIGKILL'); 
+                }
+                clusterProcess = null;
+                done(); // Zapewnij, że done() jest wywoływane
+            }, 5000);
+
+            clusterProcess.on('exit', (code, signal) => {
+                clearTimeout(timeout);
+                console.log(`[CLUSTER_TEST_TEARDOWN] Cluster process exited with code ${code} and signal ${signal}.`);
+                clusterProcess = null; 
                 done();
             });
+
+            clusterProcess.kill('SIGTERM'); 
         } else {
+            console.log('[CLUSTER_TEST_TEARDOWN] No active cluster process to stop.');
+            clusterProcess = null; 
             done();
         }
     });

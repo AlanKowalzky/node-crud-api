@@ -11,11 +11,13 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "lint": "eslint \"src/**/*.ts\" --fix",
     "test": "jest --silent",
+    "test:multi": "npm run build && jest --silent",
     "test:verbose": "jest",
-    "build": "tsc",
+    "build": "if exist dist (rd /s /q dist) && tsc",
     "start:dev": "ts-node-dev --respawn src/index.ts",
     "start:prod": "npm run build && node dist/index.js",
-    "start:multi": "cross-env CLUSTER_MODE=true ts-node src/index.ts"
+    "start:multi": "cross-env CLUSTER_MODE=true ts-node src/index.ts",
+    "start:prod:multi": "npm run build && cross-env CLUSTER_MODE=true node dist/index.js"
   },
   "devDependencies": {
     "@babel/preset-env": "^7.24.0",

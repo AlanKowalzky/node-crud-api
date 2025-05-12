@@ -14,7 +14,13 @@ if (process.env.CLUSTER_MODE === 'true') {
     new ClusterMain(PORT).start();
   } else {
     // Jesteśmy w workerze, uruchamiamy serwer workera
-    startWorkerServer();
+    try {
+      console.log(`[WORKER_INDEX_LOG] Worker ${process.pid} (id: ${cluster.worker?.id}) attempting to start server...`);
+      startWorkerServer();
+    } catch (err: any) { // Dodano typ dla err
+      console.error(`[WORKER_INDEX_ERROR] Critical error starting worker ${process.pid} (id: ${cluster.worker?.id}): ${err.message}`, err.stack);
+      process.exit(1); // Zapewnij wyjście workera przy krytycznym błędzie startu
+    }
   }
 } else {
   // Tryb pojedynczej instancji
